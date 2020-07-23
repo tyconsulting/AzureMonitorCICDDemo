@@ -1,0 +1,383 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "logAnalyticsWorkspaceResourceId" :{
+            "type": "string",
+            "metadata": {
+                "description": "Log Analytics workspace Resource Id"
+            },
+            "minLength": 121
+        },
+        "environment" :{
+            "type": "string",
+            "metadata": {
+                "description": "Environment code (LAB or PRD)"
+            },
+            "minLength": 2,
+            "maxLength": 3,
+            "defaultValue": "LAB"
+        },
+        "webTestURI" :{
+            "type": "string",
+            "metadata": {
+                "description": "URI that the web test checks"
+            },
+            "minLength": 9
+        }
+    },
+    "variables": {
+        "alertTag" : "[concat('hidden-link:', parameters('logAnalyticsWorkspaceResourceId'))]",
+        "alertSettings":[
+            {
+                "name": "WorkloadVMMissingHeartbeatAlert",
+                "description": "Workload - VM Missing Heartbeat alert",
+                "Query":"Heartbeat | where ResourceGroup contains 'rg-workload' | summarize LastHeartbeat=max(TimeGenerated) by Computer | where LastHeartbeat <ago(5m)",
+                "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+                "actiongroup": "[concat(resourceGroup().id, '/providers/microsoft.insights/actionGroups/', variables('actionGroupName'))]",
+                "Type":"ResultCount",
+                "SeverityLevel": "0",
+                "SuppressTimeinMin":5,
+                "thresholdOperator": "GreaterThan",
+                "threshold": "0",
+                "emailSubject" : "[concat(parameters('environment'), ' - Workload - VM missing heartbeat alert')]",
+                "alertFrequency": 5,
+                "alertTimeWindow": 720
+            },
+            {
+                "name": "WorkloadVMHighCPUAlert",
+                "description": "Workload - VM High CPU Utilization alert. CPU utilization over 95% for 99% of the time over the last 60 minutes.",
+                "Query":"let AssessTime = 60m;
+let CounterThreshold = 95;
+let CounterThresholdPct=99;
+Perf | where (ObjectName == 'Processor' or ObjectName == 'System') and CounterName == '% Processor Time' and TimeGenerated >ago(AssessTime) and _ResourceId contains 'rg-workload' 
+| summarize CpuOverLimit = dcountif(CounterValue, CounterValue > CounterThreshold), PerfInstanceCount = count(Computer), PctOver = round(todouble(todouble(((dcountif(CounterValue, CounterValue > CounterThreshold)*100))/todouble((count(Computer)))))) by Computer
+| where PctOver > CounterThresholdPct",
+                "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+                "actiongroup": "[concat(resourceGroup().id, '/providers/microsoft.insights/actionGroups/', variables('actionGroupName'))]",
+                "Type":"ResultCount",
+                "SeverityLevel": "0",
+                "SuppressTimeinMin":20,
+                "thresholdOperator": "GreaterThan",
+                "threshold": "0",
+                "emailSubject" : "[concat(parameters('environment'), '-Workload - VM high CPU Ulitization alert')]",
+                "alertFrequency": 10,
+                "alertTimeWindow": 60
+            },
+            {
+                "name": "WorkloadVMHighMemoryAlert",
+                "description": "Workload - VM High Memory Utilization alert. Memory utilization over 95% for 99% of the time over the last 60 minutes.",
+                "Query":"let AssessTime = 60m;
+let CounterThreshold = 95;
+let CounterThresholdPct=99;
+Perf | where ObjectName == 'Memory' and (CounterName =~ '% Used Memory' or CounterName =~ '% committed bytes in Use')  and TimeGenerated >ago(AssessTime) and _ResourceId contains 'rg-workload' 
+| summarize MemoryOverLimit = dcountif(CounterValue, CounterValue > CounterThreshold), PerfInstanceCount = count(Computer), PctOver = round(todouble(todouble(((dcountif(CounterValue, CounterValue > CounterThreshold)*100))/todouble((count(Computer)))))) by Computer
+| where PctOver > CounterThresholdPct",
+                "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+                "actiongroup": "[concat(resourceGroup().id, '/providers/microsoft.insights/actionGroups/', variables('actionGroupName'))]",
+                "Type":"ResultCount",
+                "SeverityLevel": "0",
+                "SuppressTimeinMin":20,
+                "thresholdOperator": "GreaterThan",
+                "threshold": "0",
+                "emailSubject" : "[concat(parameters('environment'), ' - Workload - VM high Memory Ulitization alert')]",
+                "alertFrequency": 10,
+                "alertTimeWindow": 60
+            },
+            {
+                "name": "WorkloadVMLinuxLowDiskSpaceAlert",
+                "description": "Workload - Linux VM Low Disk Free Space alert. Free Space less than 20%.",
+                "Query":"Perf
+| where ObjectName =~ 'logical disk' and CounterName =~ '% used space' and _ResourceId contains 'workload'
+| summarize FreeSpacePct = 100 - min(CounterValue) by Computer, InstanceName
+| where InstanceName !~ '_total'
+| where FreeSpacePct < 20",
+                "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+                "actiongroup": "[concat(resourceGroup().id, '/providers/microsoft.insights/actionGroups/', variables('actionGroupName'))]",
+                "Type":"ResultCount",
+                "SeverityLevel": "0",
+                "SuppressTimeinMin":20,
+                "thresholdOperator": "GreaterThan",
+                "threshold": "0",
+                "emailSubject" : "[concat(parameters('environment'), ' - Workload - Linux VM Low Disk Free Space alert')]",
+                "alertFrequency": 10,
+                "alertTimeWindow": 10
+            },
+            {
+                "name": "WorkloadBackupAlert",
+                "description": "Workload - Backup alert",
+                "Query":"AzureDiagnostics
+| where Category == 'AzureBackupReport' and SchemaVersion_s == 'V2' and _ResourceId contains 'workload'
+| where AlertStatus_s == 'Active'",
+                "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+                "actiongroup": "[concat(resourceGroup().id, '/providers/microsoft.insights/actionGroups/', variables('actionGroupName'))]",
+                "Type":"ResultCount",
+                "SeverityLevel": "0",
+                "SuppressTimeinMin":30,
+                "thresholdOperator": "GreaterThan",
+                "threshold": "0",
+                "emailSubject" : "[concat(parameters('environment'), ' - Workload - Backup alert')]",
+                "alertFrequency": 30,
+                "alertTimeWindow": 30
+            },
+            {
+                "name": "WorkloadMySQLLowStorageSpaceAlert",
+                "description": "Workload - MySQL low storage space alert. Free Space less than 20%.",
+                "Query":"AzureMetrics
+| where ResourceProvider =~ 'microsoft.dbformysql' and MetricName =~ 'storage_percent' and ResourceGroup contains 'workload' 
+| summarize FreeSpacePct = 100 - min(Average) by Resource
+| where FreeSpacePct < 20",
+                "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+                "actiongroup": "[concat(resourceGroup().id, '/providers/microsoft.insights/actionGroups/', variables('actionGroupName'))]",
+                "Type":"ResultCount",
+                "SeverityLevel": "0",
+                "SuppressTimeinMin":30,
+                "thresholdOperator": "GreaterThan",
+                "threshold": "0",
+                "emailSubject" : "[concat(parameters('environment'), ' - Workload - MySQL Low Storage Space alert')]",
+                "alertFrequency": 30,
+                "alertTimeWindow": 30
+            },
+            {
+                "name": "WorkloadMySQLHighCPUAlert",
+                "description": "Workload - MySQL High CPU Utilization alert.",
+                "Query":"let AssessTime = 60m;
+let CounterThreshold = 95;
+let CounterThresholdPct = 99;
+AzureMetrics
+| where ResourceProvider =~ 'microsoft.dbformysql' and MetricName =~ 'cpu_percent' and ResourceGroup contains 'rg-workload'
+| summarize CpuOverLimit = dcountif(Average, Average > CounterThreshold), PerfInstanceCount = count(ResourceId), PctOver = round(todouble(todouble(((dcountif(Average, Average > CounterThreshold)*100))/todouble((count(ResourceId)))))) by ResourceId
+| where PctOver > CounterThresholdPct",
+                "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+                "actiongroup": "[concat(resourceGroup().id, '/providers/microsoft.insights/actionGroups/', variables('actionGroupName'))]",
+                "Type":"ResultCount",
+                "SeverityLevel": "0",
+                "SuppressTimeinMin":30,
+                "thresholdOperator": "GreaterThan",
+                "threshold": "0",
+                "emailSubject" : "[concat(parameters('environment'), ' - Workload - MySQL High CPU Utilization alert')]",
+                "alertFrequency": 10,
+                "alertTimeWindow": 60
+            },
+            {
+                "name": "WorkloadMySQLHighMemoryAlert",
+                "description": "Workload - MySQL High Memory Utilization alert.",
+                "Query":"let AssessTime = 60m;
+let CounterThreshold = 95;
+let CounterThresholdPct = 99;
+AzureMetrics
+| where ResourceProvider =~ 'microsoft.dbformysql' and MetricName =~ 'memory_percent' and ResourceGroup contains 'rg-workload'
+| summarize MemoryOverLimit = dcountif(Average, Average > CounterThreshold), PerfInstanceCount = count(ResourceId), PctOver = round(todouble(todouble(((dcountif(Average, Average > CounterThreshold)*100))/todouble((count(ResourceId)))))) by ResourceId
+| where PctOver > CounterThresholdPct",
+                "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+                "actiongroup": "[concat(resourceGroup().id, '/providers/microsoft.insights/actionGroups/', variables('actionGroupName'))]",
+                "Type":"ResultCount",
+                "SeverityLevel": "0",
+                "SuppressTimeinMin":30,
+                "thresholdOperator": "GreaterThan",
+                "threshold": "0",
+                "emailSubject" : "[concat(parameters('environment'), ' - Workload - MySQL High Memory Utilization alert')]",
+                "alertFrequency": 10,
+                "alertTimeWindow": 60
+            },
+            {
+                "name": "WorkloadLBDIPAvailabilityAlert",
+                "description": "Workload - Load Balancer DIP Availability alert.",
+                "Query":"AzureMetrics | where ResourceProvider =~ 'microsoft.network' and ResourceGroup contains 'rg-workload' and MetricName =~ 'dipavailability'
+| summarize MinDIPAvailabilityPct =  min(Average) by Resource
+| where MinDIPAvailabilityPct < 100",
+                "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+                "actiongroup": "[concat(resourceGroup().id, '/providers/microsoft.insights/actionGroups/', variables('actionGroupName'))]",
+                "Type":"ResultCount",
+                "SeverityLevel": "0",
+                "SuppressTimeinMin":10,
+                "thresholdOperator": "GreaterThan",
+                "threshold": "0",
+                "emailSubject" : "[concat(parameters('environment'), ' - Workload - Load Balancer DIP Availability alert')]",
+                "alertFrequency": 10,
+                "alertTimeWindow": 10
+            }
+        ],
+        "actionGroupName": "action-group-workload",
+        "actionGroupShortName": "svc-workload",
+        "emailReceivers": [
+            {
+                "name": "Workload Admin",
+                "emailAddress": "workload.admin@xyz.com"
+            },
+            {
+                "name": "Workload Support",
+                "emailAddress": "workload.support@xyz.com"
+            }
+        ],
+        "appInsightsLocation": "australiaeast",
+        "appInsightsName": "[concat('insights-workload-', parameters('environment'))]",
+        "webTestName":"[concat('workload-url-ping-test-', parameters('environment'))]",
+        "webTestFrequencySec": 300,
+        "webTestTimeoutSec": 60,
+        "webTestGuid": "[guid('workload-url-ping-test-', parameters('environment'))]",
+        "webTestAlertName": "[concat('workload-url-ping-test-alert-', parameters('environment'))]",
+        "webtestLocations": [
+            {
+                "Id": "us-ca-sjc-azr"
+            },
+            {
+                "Id": "us-tx-sn1-azr"
+            },
+            {
+                "Id": "us-il-ch1-azr"
+            },
+            {
+                "Id": "us-va-ash-azr"
+            },
+            {
+                "Id": "us-fl-mia-edge"
+            },
+            {
+                "Id": "emea-au-syd-edge"
+            }
+        ]
+    },
+    "resources": [
+        {
+            "comments": "Action Group",
+            "type": "microsoft.insights/actionGroups",
+            "name": "[variables('actionGroupName')]",
+            "apiVersion": "2018-09-01",
+            "location": "Global",
+            "tags": {},
+            "scale": null,
+            "properties": {
+                "groupShortName": "[variables('actionGroupShortName')]",
+                "enabled": true,
+                "emailReceivers": "[variables('emailReceivers')]",
+                "smsReceivers": [],
+                "webhookReceivers": [],
+                "itsmReceivers":[],
+                "azureAppPushReceivers": [],
+                "automationRunbookReceivers": [],
+                "voiceReceivers":[],
+                "logicAppReceivers":[],
+                "azureFunctionReceivers":[],
+                "armRoleReceivers":[]
+            },
+            "dependsOn": []
+        },
+        {
+            "type": "microsoft.insights/scheduledQueryRules",
+            "name": "[variables('alertSettings')[copyIndex()].name]",
+            "copy": {
+                "name": "alertRuleLoop",
+                "count": "[length(variables('alertSettings'))]"
+            },
+            "apiVersion": "2018-04-16",
+            "location": "[ResourceGroup().location]",
+            "tags": {"[variables('alertTag')]": "Resource"},
+            "scale": null,
+            "properties":{
+                "description": "[variables('alertSettings')[copyIndex()].description]",
+                "enabled": "true",
+                "source": {
+                    "query": "[variables('alertSettings')[copyIndex()].Query]",
+                    "dataSourceId": "[variables('alertSettings')[copyIndex()].SourceId]",
+                    "queryType":"[variables('alertSettings')[copyIndex()].Type]"
+                },
+                "schedule":{
+                    "frequencyInMinutes": "[variables('alertSettings')[copyIndex()].alertFrequency]",
+                    "timeWindowInMinutes": "[variables('alertSettings')[copyIndex()].alertTimeWindow]"
+                },
+                "action":{
+                    "odata.type": "Microsoft.WindowsAzure.Management.Monitoring.Alerts.Models.Microsoft.AppInsights.Nexus.DataContracts.Resources.ScheduledQueryRules.AlertingAction",
+                    "severity":"[variables('alertSettings')[copyIndex()].SeverityLevel]",
+                    "throttlingInMin": "[variables('alertSettings')[copyIndex()].SuppressTimeinMin]",
+                    "aznsAction":{
+                        "actionGroup": "[array(variables('alertSettings')[copyIndex()].actiongroup)]",
+                        "emailSubject":"[variables('alertSettings')[copyIndex()].emailSubject]"
+                    },
+                    "trigger":{
+                        "thresholdOperator":"[variables('alertSettings')[copyIndex()].thresholdOperator]",
+                        "threshold":"[variables('alertSettings')[copyIndex()].threshold]"
+                    }
+                }
+            },
+            "dependsOn": [
+                "[variables('actionGroupName')]"
+            ]
+        },
+        {
+            "type": "microsoft.insights/components",
+            "apiVersion": "2015-05-01",
+            "name": "[variables('appInsightsName')]",
+            "location": "[variables('appInsightsLocation')]",
+            "tags": {},
+            "kind": "web",
+            "properties": {
+                "Application_Type": "web"
+            }
+        },
+        {
+            "type": "microsoft.insights/webtests",
+            "apiVersion": "2015-05-01",
+            "name": "[variables('webTestName')]",
+            "location": "australiaeast",
+            "dependsOn": [
+                "[resourceId('microsoft.insights/components', variables('appInsightsName'))]"
+            ],
+            "tags": {
+                "[concat('hidden-link:', resourceId('microsoft.insights/components/', variables('appInsightsName')))]": "Resource"
+            },
+            "properties": {
+                "SyntheticMonitorId": "[variables('webTestName')]",
+                "Name": "[variables('webTestName')]",
+                "Enabled": true,
+                "Frequency": "[variables('webTestFrequencySec')]",
+                "Timeout": "[variables('webTestTimeoutSec')]",
+                "Kind": "ping",
+                "RetryEnabled": true,
+                "Locations": "[variables('webtestLocations')]",
+                "Configuration": {
+                    "webTest": "[concat('<WebTest Name=\"', variables('webTestName'), '\"', ' Id=\"', variables('webTestGuid'), '\" ', 'Enabled=\"True\" CssProjectStructure=\"\" CssIteration=\"\" Timeout=\"60\" WorkItemIds=\"\" xmlns=\"http://microsoft.com/schemas/VisualStudio/TeamTest/2010\" Description=\"\" CredentialUserName=\"\" CredentialPassword=\"\" PreAuthenticate=\"True\" Proxy=\"default\" StopOnError=\"False\" RecordedResultFile=\"\" ResultsLocale=\"\"><Items><Request Method=\"GET\" Guid=\"abbe6591-46aa-46eb-478c-7bb10936cc5e\" Version=\"1.1\" Url=\"', parameters('webTestURI'), '\" ThinkTime=\"0\" Timeout=\"60\" ParseDependentRequests=\"False\" FollowRedirects=\"True\" RecordResult=\"True\" Cache=\"False\" ResponseTimeGoal=\"0\" Encoding=\"utf-8\" ExpectedHttpStatusCode=\"200\" ExpectedResponseUrl=\"\" ReportingName=\"\" IgnoreHttpStatusCode=\"False\" /></Items></WebTest>')]"
+                }
+            }
+        },
+        {
+            "type": "microsoft.insights/metricalerts",
+            "apiVersion": "2018-03-01",
+            "name": "[variables('webTestAlertName')]",
+            "location": "global",
+            "dependsOn": [
+                "[resourceId('microsoft.insights/webtests', variables('webTestName'))]",
+                "[resourceId('microsoft.insights/components', variables('appInsightsName'))]",
+                "[resourceId('microsoft.insights/actionGroups', variables('actionGroupName'))]"
+            ],
+            "tags": {
+                "[concat('hidden-link:', resourceId('microsoft.insights/components/', variables('appInsightsName')))]": "Resource",
+                "[concat('hidden-link:', resourceId('microsoft.insights/webtests/', variables('webTestName')))]": "Resource"
+            },
+            "properties": {
+                "description": "[concat('Workload App ', parameters('environment'), ' Environment ', parameters('webTestURI'), ' is DOWN!')]",
+                "severity": 0,
+                "enabled": true,
+                "scopes": [
+                    "[resourceId('microsoft.insights/webtests', variables('webTestName'))]",
+                    "[resourceId('microsoft.insights/components', variables('appInsightsName'))]"
+                ],
+                "evaluationFrequency": "PT1M",
+                "windowSize": "PT5M",
+                "criteria": {
+                    "webTestId": "[resourceId('microsoft.insights/webtests', variables('webTestName'))]",
+                    "componentId": "[resourceId('microsoft.insights/components', variables('appInsightsName'))]",
+                    "failedLocationCount": 2,
+                    "odata.type": "Microsoft.Azure.Monitor.WebtestLocationAvailabilityCriteria"
+                },
+                "actions": [
+                    {
+                        "actionGroupId": "[resourceId('microsoft.insights/actionGroups', variables('actionGroupName'))]",
+                        "webHookProperties": {}
+                    }
+                ]
+            }
+        }
+    ],
+    "outputs": {}
+}

@@ -1,0 +1,249 @@
+name: $(BuildDefinitionName)_$(SourceBranchName)_$(Date:yyyyMMdd)$(Rev:.r)
+trigger:
+  branches:
+    include:
+    - master
+  paths:
+    exclude:
+    - 'README.md'
+    - 'tests/*'
+    include:
+      - 'management/*'
+pr:
+  branches:
+    include:
+      - master
+      - feature/*
+  paths:
+    exclude:
+    - 'README.md'
+    - 'tests/*'
+    include:
+      - 'management/*'
+stages:
+- stage: test_and_build
+  displayName: 'Test and Build'
+  variables:
+  - group: variables - mgmt (dev)
+  - name: arm-ttk-skipped-tests
+    value: 'IDs-Should-Be-Derived-From-ResourceIDs'
+  jobs:
+  - job: security_scan
+    displayName: Security Scan
+    pool:
+      vmImage: windows-latest
+    steps:
+    - task: ms-codeanalysis.vss-microsoft-security-code-analysis-devops.build-task-antimalware.AntiMalware@3
+      displayName: 'AntiMalware Scan'
+      inputs:
+        FileDirPath: '$(Build.SourcesDirectory)'
+        EnableServices: true
+    - task: ms-codeanalysis.vss-microsoft-security-code-analysis-devops.build-task-credscan.CredScan@2
+      displayName: 'Run Credential Scanner'
+      inputs:
+        outputFormat: csv
+        scanFolder: '$(Build.SourcesDirectory)'
+        verboseOutput: true
+    - task: ms-codeanalysis.vss-microsoft-security-code-analysis-devops.build-task-publishsecurityanalysislogs.PublishSecurityAnalysisLogs@2
+      displayName: 'Publish Security Analysis Logs'
+      condition: succeededOrFailed()
+    - task: ms-codeanalysis.vss-microsoft-security-code-analysis-devops.build-task-report.SdtReport@1
+      displayName: 'Create Security Analysis Report'
+      inputs:
+        AllTools: true
+      condition: succeededOrFailed()
+    - task: ms-codeanalysis.vss-microsoft-security-code-analysis-devops.build-task-postanalysis.PostAnalysis@1
+      displayName: 'Post Analysis'
+      inputs:
+        AllTools: true
+      condition: succeededOrFailed()
+  - job: lint_tests
+    displayName: Lint Tests
+    dependsOn: security_scan
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+    - script: |
+        docker pull github/super-linter:latest
+        docker run -e RUN_LOCAL=true -v $(System.DefaultWorkingDirectory)/management:/tmp/lint github/super-linter
+      displayName: 'Code Scan using GitHub Super-Linter'
+  - job: arm_ttk_test
+    displayName: ARM TTK Tests
+    dependsOn: lint_tests
+    pool:
+      vmImage: windows-latest
+    steps:
+    - task: PowerShell@2
+      displayName: 'Install arm-ttk module'
+      inputs:
+        targetType: filePath
+        filePath: '$(Build.SourcesDirectory)/management/tests/install-arm-ttk.ps1'
+        arguments: '-workingDir $(Agent.TempDirectory)'
+    - powershell: |
+        Import-Module "$(Agent.TempDirectory)\arm-ttk-latest\arm-ttk\arm-ttk.psm1" 
+        Invoke-Pester -Script @{path='$(Build.SourcesDirectory)/management/tests/test.arm-ttk.ps1'; Parameters=@{TemplatePath = '$(Build.SourcesDirectory)\management\template\azuredeploy.json'; TestParameters = @{skip = '$(arm-ttk-skipped-tests)'}; ARMTTKModulePath = '$(Agent.TempDirectory)\arm-ttk-latest\arm-ttk'}} -OutputFile $(Build.SourcesDirectory)\TEST-Mgmt.ARMTemplate.xml -OutputFormat 'NUnitXml' -PassThru
+      displayName: 'Run ARM-TTK Tests'
+      errorActionPreference: continue
+    - task: PublishTestResults@2
+      displayName: 'Publish Test Results'
+      inputs:
+        testResultsFormat: NUnit
+        testResultsFiles: '**/TEST-*.xml' 
+        failTaskOnFailedTests: true
+      condition: always()
+  - job: ARM_Deployment_Validation
+    displayName: ARM Deployment Validation
+    dependsOn: arm_ttk_test
+    pool:
+      vmImage: windows-latest
+    steps:
+    - task: AzurePowerShell@5
+      displayName: 'Get management subscription Id'
+      inputs:
+        azureSubscription: 'sub-mgmt-lab'
+        ScriptType: InlineScript
+        Inline: |
+          $subId = (get-azcontext).subscription.id
+          Write-Output ("##vso[task.setvariable variable=mgmtSubId]$subId")
+        azurePowerShellVersion: LatestVersion
+    - task: AzureResourceManagerTemplateDeployment@3
+      displayName: 'Template Validation - Management Sub Monitoring'
+      inputs:
+        deploymentScope: Subscription
+        azureResourceManagerConnection: 'sub-mgmt-lab'
+        subscriptionId: '$(mgmtSubId)'
+        location: '$(MgmtSubLocation)'
+        csmFile: management/template/azuredeploy.json
+        overrideParameters: '-logAnalyticsWorkspaceResourceId $(logAnalyticsWorkspaceResourceId)'
+        deploymentMode: Validation
+    - task: AzureCLI@2
+      displayName: 'Get Deployment What-If Result'
+      inputs:
+        azureSubscription: 'sub-mgmt-lab'
+        scriptType: ps
+        scriptLocation: inlineScript
+        inlineScript: |
+          az deployment sub what-if  --template-file 'management/template/azuredeploy.json' --parameters logAnalyticsWorkspaceResourceId='$(logAnalyticsWorkspaceResourceId)' --location '$(MgmtSubLocation)' --result-format 'FullResourcePayloads'
+  - job: Publish_Pattern
+    displayName: Publish Pattern
+    pool:
+      vmImage: windows-latest
+    dependsOn: ARM_Deployment_Validation
+    steps:
+    - task: CopyFiles@2
+      displayName: 'Copy Files to: $(Build.ArtifactStagingDirectory)'
+      inputs:
+        SourceFolder: '$(Build.SourcesDirectory)/management'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)/management'
+        CleanTargetFolder: true
+        OverWrite: true
+    - task: PublishBuildArtifacts@1
+      displayName: 'Publish Artifact: management'
+      inputs:
+        artifactName: 'management'
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)/management'
+- stage: lab_deploy
+  displayName: 'Deploy Lab Stage'
+  jobs:
+    - deployment: dev_deploy
+      variables:
+      - group: variables - mgmt (lab)
+      displayName: 'Deploy to Lab'
+      pool:
+        vmImage: windows-latest
+        timeoutInMinutes: 120
+      environment: 'lab'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+            - task: AzurePowerShell@5
+              displayName: 'Get management subscription Id'
+              inputs:
+                azureSubscription: 'sub-mgmt-lab'
+                ScriptType: InlineScript
+                Inline: |
+                  $subId = (get-azcontext).subscription.id
+                  Write-Output ("##vso[task.setvariable variable=mgmtSubId]$subId")
+                azurePowerShellVersion: LatestVersion
+            - task: AzureResourceManagerTemplateDeployment@3
+              displayName: 'Template Deployment - Lab'
+              inputs:
+                deploymentScope: Subscription
+                azureResourceManagerConnection: 'sub-mgmt-lab'
+                subscriptionId: '$(mgmtSubId)'
+                location: '$(MgmtSubLocation)'
+                csmFile: $(Agent.BuildDirectory)/management/template/azuredeploy.json
+                overrideParameters: '-logAnalyticsWorkspaceResourceId $(logAnalyticsWorkspaceResourceId)'
+                deploymentMode: Incremental
+- stage: dev_deploy
+  displayName: 'Deploy Dev Stage'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master')) 
+  jobs:
+    - deployment: dev_deploy
+      variables:
+      - group: variables - mgmt (dev)
+      displayName: 'Deploy to Dev'
+      pool:
+        vmImage: windows-latest
+        timeoutInMinutes: 120
+      environment: 'dev'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+            - task: AzurePowerShell@5
+              displayName: 'Get management subscription Id'
+              inputs:
+                azureSubscription: 'sub-mgmt-dev'
+                ScriptType: InlineScript
+                Inline: |
+                  $subId = (get-azcontext).subscription.id
+                  Write-Output ("##vso[task.setvariable variable=mgmtSubId]$subId")
+                azurePowerShellVersion: LatestVersion
+            - task: AzureResourceManagerTemplateDeployment@3
+              displayName: 'Template Deployment - Dev'
+              inputs:
+                deploymentScope: Subscription
+                azureResourceManagerConnection: 'sub-mgmt-dev'
+                subscriptionId: '$(mgmtSubId)'
+                location: '$(MgmtSubLocation)'
+                csmFile: $(Agent.BuildDirectory)/management/template/azuredeploy.json
+                overrideParameters: '-logAnalyticsWorkspaceResourceId $(logAnalyticsWorkspaceResourceId)'
+                deploymentMode: Incremental
+- stage: prod_deploy
+  displayName: 'Deploy Prod Stage'
+  condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/master')) 
+  jobs:
+    - deployment: prod_deploy
+      variables:
+      - group: variables - mgmt (prod)
+      displayName: 'Deploy to Prod'
+      pool:
+        vmImage: windows-latest
+        timeoutInMinutes: 120
+      timeoutInMinutes: 120
+      environment: 'prod'
+      strategy:
+        runOnce:
+          deploy:
+            steps:
+            - task: AzurePowerShell@5
+              displayName: 'Get management subscription Id'
+              inputs:
+                azureSubscription: 'sub-mgmt-prod'
+                ScriptType: InlineScript
+                Inline: |
+                  $subId = (get-azcontext).subscription.id
+                  Write-Output ("##vso[task.setvariable variable=mgmtSubId]$subId")
+                azurePowerShellVersion: LatestVersion
+            - task: AzureResourceManagerTemplateDeployment@3
+              displayName: 'Template Deployment - Prod'
+              inputs:
+                deploymentScope: Subscription
+                azureResourceManagerConnection: 'sub-mgmt-prod'
+                subscriptionId: '$(mgmtSubId)'
+                location: '$(MgmtSubLocation)'
+                csmFile: $(Agent.BuildDirectory)/management/template/azuredeploy.json
+                overrideParameters: '-logAnalyticsWorkspaceResourceId $(logAnalyticsWorkspaceResourceId)'
+                deploymentMode: Incremental

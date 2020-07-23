@@ -1,0 +1,355 @@
+{
+    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+    "contentVersion": "1.0.0.0",
+    "parameters": {
+        "svcHealthAlertScope": {
+            "type": "array",
+            "metadata": {
+                "description": "Service Health alert scopes"
+            },
+            "defaultValue": [ "[subscription().id]" ]
+        },
+        "logAnalyticsWorkspaceResourceId": {
+            "type": "string",
+            "metadata": {
+                "description": "Log Analytics workspace Resource Id"
+            },
+            "minLength": 121
+        }
+    },
+    "variables": {
+        "alertTag": "[concat('hidden-link:', parameters('logAnalyticsWorkspaceResourceId'))]",
+        "alertSchedule": {
+            "Frequency": 5,
+            "Time": 5
+        },
+        "ServicehealthAlertsName": "ServiceHealthActivityLogAlert",
+        "ServicehealthAlertsDescription": "Azure Service Health Alerts",
+        "expressRouteAlertSettings": {
+            "name": "ExpressRouteAlert",
+            "description": "Express Route Alerts",
+            "Query": "NetworkMonitoring | where (SubType == \"ExpressRouteCircuitUtilization\") and (UtilizationHealthState == \"Unhealthy\")",
+            "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+            "actiongroup": "[concat(subscription().id, '/resourceGroups/', variables('resourceGroupName'), '/providers/microsoft.insights/actionGroups/', variables('action-groups')[2].name)]",
+            "Type": "ResultCount",
+            "SeverityLevel": "0",
+            "SuppressTimeinMin": 20
+        },
+        "expressRouteAlertTrigger": {
+            "Operator": "GreaterThan",
+            "Threshold": "0"
+        },
+        "securityAlertSettings": {
+            "name": "SecurityAlert",
+            "description": "Security alerts",
+            "Query": "SecurityAlert",
+            "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+            "actiongroup": "[concat(subscription().id, '/resourceGroups/', variables('resourceGroupName'), '/providers/microsoft.insights/actionGroups/', variables('action-groups')[1].name)]",
+            "Type": "ResultCount",
+            "SeverityLevel": "0",
+            "SuppressTimeinMin": 20
+        },
+        "securityAlertTrigger": {
+            "Operator": "GreaterThan",
+            "Threshold": "0"
+        },
+        "missingUpdatesAlertSettings": {
+            "name": "MissingUpdatesAlert",
+            "description": "Missing Updates alerts",
+            "Query": "UpdateSummary | where TotalUpdatesMissing >0 and OldestMissingSecurityUpdateInDays >=14 and ComputerEnvironment == 'Azure'",
+            "SourceId": "[parameters('logAnalyticsWorkspaceResourceId')]",
+            "actiongroup": "[concat(subscription().id, '/resourceGroups/', variables('resourceGroupName'), '/providers/microsoft.insights/actionGroups/', variables('action-groups')[1].name)]",
+            "Type": "ResultCount",
+            "SeverityLevel": "0",
+            "SuppressTimeinMin": 20
+        },
+        "missingUpdatesAlertTrigger": {
+            "Operator": "GreaterThan",
+            "Threshold": "0"
+        },
+        "resourceGroupName": "rg-mgmt-monitoring",
+        "action-groups": [
+            {
+                "name": "action-group-servicehealth",
+                "shortName": "svc-health",
+                "emailAddress": "azure-service-health@xyz.com"
+            },
+            {
+                "name": "action-group-securityalerts",
+                "shortName": "sec-alerts",
+                "emailAddress": "azure-security-alerts@xyz.com"
+            },
+            {
+                "name": "action-group-networkalerts",
+                "shortName": "ntwk-alerts",
+                "emailAddress": "azure-network-alerts@xyz.com"
+            }
+        ]
+    },
+    "resources": [
+        {
+            "type": "Microsoft.Resources/resourceGroups",
+            "apiVersion": "2020-06-01",
+            "location": "[deployment().location]",
+            "name": "[variables('resourceGroupName')]",
+            "properties": {}
+        },
+        {
+            "type": "Microsoft.Resources/deployments",
+            "apiVersion": "2020-06-01",
+            "name": "[concat('actionGroupsDeployment-',copyIndex())]",
+            "copy": {
+                "name": "actionGroupLoop",
+                "count": "[length(variables('action-groups'))]"
+            },
+            "resourceGroup": "[variables('resourceGroupName')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Resources/resourceGroups/', variables('resourceGroupName'))]"
+            ],
+            "properties": {
+                "mode": "Incremental",
+                "template": {
+                    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                    "contentVersion": "1.0.0.0",
+                    "resources": [
+                        {
+                            "comments": "Action Group",
+                            "type": "microsoft.insights/actionGroups",
+                            "name": "[variables('action-groups')[copyIndex()].name]",
+                            "apiVersion": "2019-06-01",
+                            "location": "Global",
+                            "properties": {
+                                "groupShortName": "[variables('action-groups')[copyIndex()].shortName]",
+                                "enabled": true,
+                                "emailReceivers": [
+                                    {
+                                        "name": "[variables('action-groups')[copyIndex()].shortName]",
+                                        "emailAddress": "[variables('action-groups')[copyIndex()].emailAddress]"
+                                    }
+                                ]
+                            }
+                        }
+                    ],
+                    "outputs": {}
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Resources/deployments",
+            "apiVersion": "2020-06-01",
+            "name": "serviceHealthAlertsDeployment",
+            "resourceGroup": "[variables('resourceGroupName')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Resources/resourceGroups/', variables('resourceGroupName'))]",
+                "actionGroupLoop"
+            ],
+            "properties": {
+                "mode": "Incremental",
+                "template": {
+                    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {},
+                    "variables": {},
+                    "resources": [
+                        {
+                            "comments": "Service Health Alert",
+                            "type": "microsoft.insights/activityLogAlerts",
+                            "name": "[variables('ServicehealthAlertsName')]",
+                            "apiVersion": "2017-04-01",
+                            "location": "Global",
+                            "properties": {
+                                "scopes": "[parameters('svcHealthAlertScope')]",
+                                "condition": {
+                                    "allOf": [
+                                        {
+                                            "field": "category",
+                                            "equals": "ServiceHealth"
+                                        }
+                                    ]
+                                },
+                                "actions": {
+                                    "actionGroups": [
+                                        {
+                                            "actionGroupId": "[resourceId('microsoft.insights/actionGroups', variables('action-groups')[0].name)]"
+                                        }
+                                    ]
+                                },
+                                "enabled": true,
+                                "description": "[variables('ServicehealthAlertsDescription')]"
+                            }
+                        }
+                    ],
+                    "outputs": {}
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Resources/deployments",
+            "apiVersion": "2020-06-01",
+            "name": "expressRouteAlertsDeployment",
+            "resourceGroup": "[variables('resourceGroupName')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Resources/resourceGroups/', variables('resourceGroupName'))]",
+                "actionGroupLoop"
+            ],
+            "properties": {
+                "mode": "Incremental",
+                "template": {
+                    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {},
+                    "variables": {},
+                    "resources": [
+                        {
+                            "comments": "Express Route Alert",
+                            "type": "microsoft.insights/scheduledQueryRules",
+                            "name": "[variables('expressRouteAlertSettings').name]",
+                            "apiVersion": "2018-04-16",
+                            "location": "[replace(reference(parameters('logAnalyticsWorkspaceResourceId'), '2020-03-01-preview', 'Full').location, ' ', '')]",
+                            "tags": { "[variables('alertTag')]": "Resource" },
+                            "properties": {
+                                "description": "[variables('expressRouteAlertSettings').description]",
+                                "enabled": "true",
+                                "source": {
+                                    "query": "[variables('expressRouteAlertSettings').Query]",
+                                    "dataSourceId": "[variables('expressRouteAlertSettings').SourceId]",
+                                    "queryType": "[variables('expressRouteAlertSettings').Type]"
+                                },
+                                "schedule": {
+                                    "frequencyInMinutes": "[variables('alertSchedule').Frequency]",
+                                    "timeWindowInMinutes": "[variables('alertSchedule').Time]"
+                                },
+                                "action": {
+                                    "odata.type": "Microsoft.WindowsAzure.Management.Monitoring.Alerts.Models.Microsoft.AppInsights.Nexus.DataContracts.Resources.ScheduledQueryRules.AlertingAction",
+                                    "severity": "[variables('expressRouteAlertSettings').SeverityLevel]",
+                                    "throttlingInMin": "[variables('expressRouteAlertSettings').SuppressTimeinMin]",
+                                    "aznsAction": {
+                                        "actionGroup": "[array(variables('expressRouteAlertSettings').actiongroup)]",
+                                        "emailSubject": "Azure Express Route Alert"
+                                    },
+                                    "trigger": {
+                                        "thresholdOperator": "[variables('expressRouteAlertTrigger').Operator]",
+                                        "threshold": "[variables('expressRouteAlertTrigger').Threshold]"
+                                    }
+                                }
+                            }
+                        }
+                    ],
+                    "outputs": {}
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Resources/deployments",
+            "apiVersion": "2020-06-01",
+            "name": "securityAlertsDeployment",
+            "resourceGroup": "[variables('resourceGroupName')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Resources/resourceGroups/', variables('resourceGroupName'))]",
+                "actionGroupLoop"
+            ],
+            "properties": {
+                "mode": "Incremental",
+                "template": {
+                    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {},
+                    "variables": {},
+                    "resources": [
+                        {
+                            "comments": "Security Alert",
+                            "type": "microsoft.insights/scheduledQueryRules",
+                            "name": "[variables('securityAlertSettings').name]",
+                            "apiVersion": "2018-04-16",
+                            "location": "[replace(reference(parameters('logAnalyticsWorkspaceResourceId'), '2020-03-01-preview', 'Full').location, ' ', '')]",
+                            "tags": { "[variables('alertTag')]": "Resource" },
+                            "properties": {
+                                "description": "[variables('securityAlertSettings').description]",
+                                "enabled": "true",
+                                "source": {
+                                    "query": "[variables('securityAlertSettings').Query]",
+                                    "dataSourceId": "[variables('securityAlertSettings').SourceId]",
+                                    "queryType": "[variables('securityAlertSettings').Type]"
+                                },
+                                "schedule": {
+                                    "frequencyInMinutes": "[variables('alertSchedule').Frequency]",
+                                    "timeWindowInMinutes": "[variables('alertSchedule').Time]"
+                                },
+                                "action": {
+                                    "odata.type": "Microsoft.WindowsAzure.Management.Monitoring.Alerts.Models.Microsoft.AppInsights.Nexus.DataContracts.Resources.ScheduledQueryRules.AlertingAction",
+                                    "severity": "[variables('securityAlertSettings').SeverityLevel]",
+                                    "throttlingInMin": "[variables('securityAlertSettings').SuppressTimeinMin]",
+                                    "aznsAction": {
+                                        "actionGroup": "[array(variables('securityAlertSettings').actiongroup)]",
+                                        "emailSubject": "Security Alert"
+                                    },
+                                    "trigger": {
+                                        "thresholdOperator": "[variables('securityAlertTrigger').Operator]",
+                                        "threshold": "[variables('securityAlertTrigger').Threshold]"
+                                    }
+                                }
+                            }
+                        }
+                    ],
+                    "outputs": {}
+                }
+            }
+        },
+        {
+            "type": "Microsoft.Resources/deployments",
+            "apiVersion": "2020-06-01",
+            "name": "missingUpdatesAlertsDeployment",
+            "resourceGroup": "[variables('resourceGroupName')]",
+            "dependsOn": [
+                "[resourceId('Microsoft.Resources/resourceGroups/', variables('resourceGroupName'))]",
+                "actionGroupLoop"
+            ],
+            "properties": {
+                "mode": "Incremental",
+                "template": {
+                    "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+                    "contentVersion": "1.0.0.0",
+                    "parameters": {},
+                    "variables": {},
+                    "resources": [
+                        {
+                            "comments": "Missing Updates Alert",
+                            "type": "microsoft.insights/scheduledQueryRules",
+                            "name": "[variables('missingUpdatesAlertSettings').name]",
+                            "apiVersion": "2018-04-16",
+                            "location": "[replace(reference(parameters('logAnalyticsWorkspaceResourceId'), '2020-03-01-preview', 'Full').location, ' ', '')]",
+                            "tags": { "[variables('alertTag')]": "Resource" },
+                            "properties": {
+                                "description": "[variables('missingUpdatesAlertSettings').description]",
+                                "enabled": "true",
+                                "source": {
+                                    "query": "[variables('missingUpdatesAlertSettings').Query]",
+                                    "dataSourceId": "[variables('missingUpdatesAlertSettings').SourceId]",
+                                    "queryType": "[variables('missingUpdatesAlertSettings').Type]"
+                                },
+                                "schedule": {
+                                    "frequencyInMinutes": "[variables('alertSchedule').Frequency]",
+                                    "timeWindowInMinutes": "[variables('alertSchedule').Time]"
+                                },
+                                "action": {
+                                    "odata.type": "Microsoft.WindowsAzure.Management.Monitoring.Alerts.Models.Microsoft.AppInsights.Nexus.DataContracts.Resources.ScheduledQueryRules.AlertingAction",
+                                    "severity": "[variables('missingUpdatesAlertSettings').SeverityLevel]",
+                                    "throttlingInMin": "[variables('missingUpdatesAlertSettings').SuppressTimeinMin]",
+                                    "aznsAction": {
+                                        "actionGroup": "[array(variables('missingUpdatesAlertSettings').actiongroup)]",
+                                        "emailSubject": "Azure VM Missing Updates Alert"
+                                    },
+                                    "trigger": {
+                                        "thresholdOperator": "[variables('missingUpdatesAlertTrigger').Operator]",
+                                        "threshold": "[variables('missingUpdatesAlertTrigger').Threshold]"
+                                    }
+                                }
+                            }
+                        }
+                    ],
+                    "outputs": {}
+                }
+            }
+        }
+    ]
+}
